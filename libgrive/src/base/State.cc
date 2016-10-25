@@ -51,14 +51,20 @@ State::~State()
 std::string GlobToRegexp(const std::string glob)
 {
 	// replace "*" with non-newline
+	// * does not match /
+	// ** does match /
+	boost::regex_replace_all(glob, boost::regexp("\*\*"), ".*");
+	boost::regex_replace_all(glob, boost::regexp("\*"), "[^/]*");
+
 	// replace "?" with .
+	boost::regex_replace_all(glob, boost::regexp("\?"), "[^/]");
+
 	// escape regexp specials
+
 	// replace newline with "|" construction
 	// ignore lines starting with # or those who are empty
 	// ignore trailing spaces
 	// leading / matches start of path (^)
-	// * does not match /
-	// ** does match /
 	return "";
 }
 
