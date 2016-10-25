@@ -37,21 +37,67 @@ State::State( const fs::path& filename, const Val& options  ) :
 	m_cstamp	( -1 )
 {
 	Read( filename ) ;
-	
+
 	// the "-f" option will make grive always think remote is newer
 	m_force = options.Has( "force" ) ? options["force"].Bool() : false ;
-	
-	std::string m_orig_ign = m_ign;
-	m_ign = "";
-	if ( options.Has( "ignore" ) && options["ignore"].Str() != m_ign )
-		m_ign = options["ignore"].Str();
-	else if ( options.Has( "dir" ) )
+
+	m_ign_re = BuildIgnoreRegex(options);
+}
+
+State::~State()
+{
+}
+
+std::string GlobToRegexp(const std::string glob)
+{
+	// replace "*" with non-newline
+	// replace "?" with .
+	// escape regexp specials
+	// replace newline with "|" construction
+	// ignore lines starting with # or those who are empty
+	// ignore trailing spaces
+	// leading / matches start of path (^)
+	// * does not match /
+	// ** does match /
+	return "";
+}
+
+std::string& AddItemToStringList(std::string& list, std::string item, const std::string separator="|")
+{
+	if ( ! item.empty() )
+		if ( ! list.empty() )
+			list += separator;
+		list += item;
+	return list;
+}
+
+boost::regex State::BuildIgnoreRegex( const Val& options )
+{
+	std::string re_default_ignore = "^\\.(grive|grive_state|trash)";
+	std::string re_options = "";
+	std::string re_ignorelist = "";
+	std::string re_ignore = "";
+	std::string re_ignore_dir = "";
+
+	if ( options.Has( "ignorelist" ) )
+	{
+		std::string ignorelist( options["ignorelist"].Str() );
+		Log ( "ignorelist set to %1% but content is ignored" , ignorelist, log::verbose );
+		re_ignorelist = "^\\"+ignorelist;
+	}
+
+	if ( options.Has( "ignore" ) )
+	{
+		re_options = options["ignore"].Str();
+	}
+
+	if ( options.Has( "dir" ) )
 	{
 		const boost::regex trim_path( "^/+|/+$" );
 		std::string m_dir = regex_replace( options["dir"].Str(), trim_path, "" );
 		if ( !m_dir.empty() )
 		{
-			// "-s" is internally converted to an ignore regexp
+			// "dir" is internally converted to an ignore regexp
 			const boost::regex esc( "[.^$|()\\[\\]{}*+?\\\\]" );
 			m_dir = regex_replace( m_dir, esc, "\\\\&", boost::format_sed );
 			size_t pos = 0;
@@ -60,17 +106,20 @@ State::State( const fs::path& filename, const Val& options  ) :
 				m_dir = m_dir.substr( 0, pos ) + "$|" + m_dir;
 				pos = pos*2 + 3;
 			}
-			std::string ign = "^(?!"+m_dir+"(/|$))";
-			m_ign = ign;
+			re_ignore_dir = "^(?!"+m_dir+"(/|$))";
 		}
 	}
 
-	m_ign_changed = m_orig_ign != "" && m_orig_ign != m_ign;
-	m_ign_re = boost::regex( m_ign.empty() ? "^\\.(grive|grive_state|trash)" : ( m_ign+"|^\\.(grive|grive_state|trash)" ) );
-}
+	AddItemToStringList(re_ignore, re_ignore_dir);
+	AddItemToStringList(re_ignore, re_options);
+	AddItemToStringList(re_ignore, re_ignorelist);
+	AddItemToStringList(re_ignore, re_default_ignore);
 
-State::~State()
-{
+	if ( ! re_ignore.empty() )
+		re_ignore = "("+re_ignore+")";
+
+	Log( "ignore is set to %1%", re_ignore, log::verbose ) ;
+	return boost::regex( re_ignore );
 }
 
 /// Synchronize local directory. Build up the resource tree from files and folders
@@ -97,7 +146,7 @@ void State::FromLocal( const fs::path& p, Resource* folder, Val& tree )
 	{
 		std::string fname = i->path().filename().string() ;
 		std::string path = folder->IsRoot() ? fname : ( folder->RelPath() / fname ).string();
-		
+
 		if ( IsIgnore( path ) )
 			Log( "file %1% is ignored by grive", path, log::verbose ) ;
 		else
@@ -154,10 +203,10 @@ void State::FromRemote( const Entry& e )
 	// common checkings
 	if ( !e.IsDir() && ( fn.empty() || e.ContentSrc().empty() ) )
 		Log( "%1% \"%2%\" is a google document, ignored", k, e.Name(), log::verbose ) ;
-	
+
 	else if ( fn.find('/') != fn.npos )
 		Log( "%1% \"%2%\" contains a slash in its name, ignored", k, e.Name(), log::verbose ) ;
-	
+
 	else if ( !e.IsChange() && e.ParentHrefs().size() != 1 )
 		Log( "%1% \"%2%\" has multiple parents, ignored", k, e.Name(), log::verbose ) ;
 
@@ -200,7 +249,7 @@ std::size_t State::TryResolveEntry()
 void State::FromChange( const Entry& e )
 {
 	assert( e.IsChange() ) ;
-	
+
 	// entries in the change feed is always treated as newer in remote,
 	// so we override the last sync time to 0
 	if ( Resource *res = m_res.FindByHref( e.SelfHref() ) )
@@ -242,7 +291,7 @@ bool State::Update( const Entry& e )
 			// since we are updating the ID and Href, we need to remove it and re-add it.
 			m_res.Update( child, e ) ;
 		}
-		
+
 		// folder entry exist in google drive, but not local. we should create
 		// the directory
 		else if ( e.IsDir() || !e.Filename().empty() )
@@ -251,11 +300,11 @@ bool State::Update( const Entry& e )
 			child = new Resource( name, e.IsDir() ? "folder" : "file" ) ;
 			parent->AddChild( child ) ;
 			m_res.Insert( child ) ;
-			
+
 			// update the state of the resource
 			m_res.Update( child, e ) ;
 		}
-		
+
 		return true ;
 	}
 	else
@@ -297,7 +346,7 @@ void State::Write( const fs::path& filename )
 {
 	m_st.Set( "change_stamp", Val( m_cstamp ) ) ;
 	m_st.Set( "ignore_regexp", Val( m_ign ) ) ;
-	
+
 	std::ofstream fs( filename.string().c_str() ) ;
 	fs << m_st ;
 }
